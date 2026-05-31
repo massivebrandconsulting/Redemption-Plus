@@ -1,4 +1,4 @@
-import { AccountRecord, ActivityRecord, LeadRecord } from '../types';
+import { AccountRecord, ActivityRecord, LeadRecord, InvoiceRecord } from '../types';
 import { daysSince } from './format';
 
 export const DORMANT_DAYS = 30;
@@ -24,6 +24,12 @@ export interface CategoryTotals {
   total: { ytd: number; ly: number };
 }
 
+export interface WeeklyBucket {
+  weekLabel: string;
+  weekStart: Date;
+  amount: number;
+}
+
 export interface PulseSummary {
   totalYTD: number;
   totalLYYTD: number;
@@ -37,10 +43,122 @@ export interface PulseSummary {
   hotLeads: number;
   totalConnections: number;
   avgOrderValue: number;
+  wtd: number;
+  mtd: number;
 }
 
 const isActive = (a: AccountRecord, ref = new Date()) =>
   a.lastPurchase !== null && daysSince(a.lastPurchase, ref) <= DORMANT_DAYS;
+
+const getMonday = (d: Date): Date => {
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  const monday = new Date(d);
+  monday.setDate(d.getDate() + diff);
+  monday.setHours(0, 0, 0, 0);
+  return monday;
+};
+
+/** Derive merged AccountRecord[] from invoice transactions + optional decline-list YOY data. */
+export const deriveAccountsFromInvoices = (
+  invoices: InvoiceRecord[],
+  existingAccounts: AccountRecord[],
+): AccountRecord[] => {
+  interface Accum { rep: string; accountName: string; salesYTD: number; lastPurchase: Date | null; }
+  const statsMap = new Map<string, Accum>();
+
+  invoices.forEach(inv => {
+    const key = inv.accountName.toLowerCase().trim();
+    const cur = statsMap.get(key);
+    if (!cur) {
+      statsMap.set(key, { rep: inv.rep, accountName: inv.accountName, salesYTD: inv.amount, lastPurchase: inv.invoiceDate });
+    } else {
+      cur.salesYTD += inv.amount;
+      if (inv.invoiceDate && (!cur.lastPurchase || inv.invoiceDate > cur.lastPurchase)) {
+        cur.lastPurchase = inv.invoiceDate;
+        cur.rep = inv.rep;
+      }
+    }
+  });
+
+  const accountsLookup = new Map<string, AccountRecord>();
+  existingAccounts.forEach(a => {
+    accountsLookup.set(a.accountName.toLowerCase().trim(), a);
+  });
+
+  const result: AccountRecord[] = [];
+
+  // Accounts with invoices (enriched with YOY/category from decline list when matched)
+  statsMap.forEach(stats => {
+    const matched = accountsLookup.get(stats.accountName.toLowerCase().trim());
+    result.push({
+      rep: stats.rep,
+      accountName: stats.accountName,
+      lastPurchase: stats.lastPurchase,
+      salesYTD: stats.salesYTD,
+      salesLYYTD: matched?.salesLYYTD ?? 0,
+      yoyDiff: matched ? stats.salesYTD - matched.salesLYYTD : 0,
+      ytdChangePct: matched?.salesLYYTD ? (stats.salesYTD - matched.salesLYYTD) / matched.salesLYYTD : 0,
+      cat: matched?.cat ?? { backwall: { ytd: 0, ly: 0 }, bin: { ytd: 0, ly: 0 }, crane: { ytd: 0, ly: 0 }, plush: { ytd: 0, ly: 0 } },
+    });
+  });
+
+  // Accounts in decline list with zero invoices (completely dark this year)
+  existingAccounts.forEach(a => {
+    if (!statsMap.has(a.accountName.toLowerCase().trim())) {
+      result.push({
+        rep: a.rep,
+        accountName: a.accountName,
+        lastPurchase: a.lastPurchase,
+        salesYTD: 0,
+        salesLYYTD: a.salesLYYTD,
+        yoyDiff: -a.salesLYYTD,
+        ytdChangePct: a.salesLYYTD > 0 ? -1 : 0,
+        cat: a.cat,
+      });
+    }
+  });
+
+  return result;
+};
+
+/** Compute WTD, MTD, and 8-week rolling trend from invoice records. */
+export const getSalesTrend = (
+  invoices: InvoiceRecord[],
+  ref = new Date(),
+): { weekly: WeeklyBucket[]; wtd: number; mtd: number } => {
+  const thisMonday = getMonday(ref);
+  const monthStart = new Date(ref.getFullYear(), ref.getMonth(), 1);
+  monthStart.setHours(0, 0, 0, 0);
+
+  const weeks: WeeklyBucket[] = [];
+  for (let w = 7; w >= 0; w--) {
+    const weekStart = new Date(thisMonday);
+    weekStart.setDate(thisMonday.getDate() - w * 7);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 7);
+
+    const amount = invoices
+      .filter(inv => inv.invoiceDate >= weekStart && inv.invoiceDate < weekEnd)
+      .reduce((s, inv) => s + inv.amount, 0);
+
+    weeks.push({
+      weekLabel: weekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      weekStart,
+      amount,
+    });
+  }
+
+  const wtd = invoices
+    .filter(inv => inv.invoiceDate >= thisMonday)
+    .reduce((s, inv) => s + inv.amount, 0);
+
+  const mtd = invoices
+    .filter(inv => inv.invoiceDate >= monthStart)
+    .reduce((s, inv) => s + inv.amount, 0);
+
+  return { weekly: weeks.filter(w => w.amount > 0), wtd, mtd };
+};
 
 export const getRepSummaries = (
   accounts: AccountRecord[],
@@ -65,7 +183,6 @@ export const getRepSummaries = (
       const active = accts.filter(a => isActive(a, ref));
       const yoyDiff = salesYTD - salesLYYTD;
 
-      // Dominant category by YTD
       const cats = { backwall: 0, bin: 0, crane: 0, plush: 0 };
       accts.forEach(a => {
         cats.backwall += a.cat.backwall.ytd;
@@ -73,7 +190,7 @@ export const getRepSummaries = (
         cats.crane += a.cat.crane.ytd;
         cats.plush += a.cat.plush.ytd;
       });
-      const dominantCat = (Object.entries(cats).sort((a, b) => b[1] - a[1])[0][0]);
+      const dominantCat = Object.entries(cats).sort((a, b) => b[1] - a[1])[0][0];
 
       return {
         rep,
@@ -119,6 +236,7 @@ export const getPulse = (
   leads: LeadRecord[],
   activity: ActivityRecord[],
   ref = new Date(),
+  invoices?: InvoiceRecord[],
 ): PulseSummary => {
   const totalYTD = accounts.reduce((s, a) => s + a.salesYTD, 0);
   const totalLYYTD = accounts.reduce((s, a) => s + a.salesLYYTD, 0);
@@ -126,6 +244,14 @@ export const getPulse = (
   const dormant = accounts.filter(a => !isActive(a, ref));
   const hotLeads = leads.filter(l => l.engagementScore >= 1000);
   const totalConnections = activity.reduce((s, r) => s + r.count, 0);
+
+  let wtd = 0;
+  let mtd = 0;
+  if (invoices && invoices.length > 0) {
+    const trend = getSalesTrend(invoices, ref);
+    wtd = trend.wtd;
+    mtd = trend.mtd;
+  }
 
   return {
     totalYTD,
@@ -140,6 +266,8 @@ export const getPulse = (
     hotLeads: hotLeads.length,
     totalConnections,
     avgOrderValue: active.length > 0 ? totalYTD / active.length : 0,
+    wtd,
+    mtd,
   };
 };
 
@@ -185,10 +313,12 @@ export const allReps = (
   accounts: AccountRecord[],
   activity: ActivityRecord[],
   leads: LeadRecord[],
+  invoices?: InvoiceRecord[],
 ): string[] => {
   const s = new Set<string>();
   accounts.forEach(a => { if (a.rep) s.add(a.rep); });
   activity.forEach(r => { if (r.rep) s.add(r.rep); });
   leads.forEach(l => { if (l.owner) s.add(l.owner); });
+  invoices?.forEach(i => { if (i.rep) s.add(i.rep); });
   return Array.from(s).sort();
 };

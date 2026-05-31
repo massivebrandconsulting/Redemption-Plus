@@ -45,10 +45,19 @@ export interface Signal {
   action: string;
 }
 
+export interface InvoiceRecord {
+  invoiceDate: Date;
+  rep: string;
+  accountName: string;
+  invoiceNumber: string;
+  amount: number;
+}
+
 export interface AppData {
   accounts: AccountRecord[];
   activity: ActivityRecord[];
   leads: LeadRecord[];
+  invoices: InvoiceRecord[];
   fileNames: string[];
   uploadedAt: Date;
   asOf: string;

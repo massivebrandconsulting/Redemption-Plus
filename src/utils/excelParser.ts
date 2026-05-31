@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { AccountRecord, ActivityRecord, LeadRecord } from '../types';
+import { AccountRecord, ActivityRecord, LeadRecord, InvoiceRecord } from '../types';
 
 type Row = (string | number | boolean | null | undefined)[];
 
@@ -287,12 +287,67 @@ export const parseLeadsFile = async (file: File): Promise<LeadRecord[]> => {
   return records;
 };
 
+// ─── Invoices ──────────────────────────────────────────────────────────────
+
+export const parseInvoicesFile = async (file: File): Promise<InvoiceRecord[]> => {
+  const wb = await readWorkbook(file);
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json<Row>(ws, { header: 1, defval: null });
+
+  const headerIdx = findHeaderRow(rows, ['invoice date', 'account owner', 'invoice subtotal', 'invoice number'], 30);
+  const headers = rows[headerIdx].map(v => toStr(v));
+
+  const dateCol = findCol(headers, ['invoice date', 'date']);
+  const repCol  = findCol(headers, ['account owner', 'owner', 'rep', 'salesperson']);
+  const nameCol = findCol(headers, ['account: account name', 'account name', 'customer name', 'company']);
+  const numCol  = findCol(headers, ['invoice: invoice number', 'invoice number', 'invoice no', 'invoice #']);
+  const amtCol  = findCol(headers, ['invoice subtotal', 'subtotal', 'amount', 'total']);
+
+  const dc  = dateCol !== -1 ? dateCol : 1;
+  const rc  = repCol  !== -1 ? repCol  : 3;
+  const nc  = nameCol !== -1 ? nameCol : 4;
+  const imc = numCol  !== -1 ? numCol  : 5;
+  const ac  = amtCol  !== -1 ? amtCol  : 6;
+
+  const records: InvoiceRecord[] = [];
+  let currentDate: Date | null = null;
+  let currentRep = '';
+
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row) continue;
+
+    const dateVal = toDate(row[dc]);
+    if (dateVal) currentDate = dateVal;
+
+    const repCandidate = toStr(row[rc]);
+    if (repCandidate && looksLikeName(repCandidate)) currentRep = repCandidate;
+
+    const accountName = toStr(row[nc]);
+    if (!accountName || !looksLikeName(accountName)) continue;
+
+    const amount = toNum(row[ac]);
+    if (amount === 0) continue;
+
+    records.push({
+      invoiceDate: currentDate ?? new Date(0),
+      rep: currentRep || 'Unassigned',
+      accountName,
+      invoiceNumber: toStr(row[imc]),
+      amount,
+    });
+  }
+
+  return records;
+};
+
 // ─── File type detection ───────────────────────────────────────────────────
 
-export type FileKind = 'decline' | 'connections' | 'leads' | 'unknown';
+export type FileKind = 'decline' | 'connections' | 'leads' | 'invoices' | 'unknown';
 
 export const detectKind = (filename: string): FileKind => {
   const l = filename.toLowerCase();
+  if (l.includes('invoice') || l.includes('recorded')) return 'invoices';
   if (l.includes('decline') || l.includes('account')) return 'decline';
   if (l.includes('connect')) return 'connections';
   if (l.includes('lead')) return 'leads';

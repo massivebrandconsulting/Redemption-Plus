@@ -3,6 +3,7 @@ import { AppData } from '../types';
 import {
   getPulse, getRepSummaries, getCategoryTotals,
   getDormantAccounts, getTopAccounts, getWorstDecline, allReps,
+  deriveAccountsFromInvoices,
 } from '../utils/metrics';
 import { generateSignals } from '../utils/signals';
 import PulseBar from './sections/PulseBar';
@@ -11,6 +12,7 @@ import CategoryPanel from './sections/CategoryPanel';
 import AccountTable from './sections/AccountTable';
 import ActivityPanel from './sections/ActivityPanel';
 import SignalsPanel from './sections/SignalsPanel';
+import SalesTrend from './sections/SalesTrend';
 import { Upload, RefreshCw, ChevronDown } from 'lucide-react';
 
 interface Props {
@@ -20,26 +22,46 @@ interface Props {
 
 export default function CommandCenter({ data, onReset }: Props) {
   const [selectedRep, setSelectedRep] = useState('');
-  const ref = new Date();
+  const ref = useMemo(() => new Date(), []);
 
-  const reps = useMemo(
-    () => allReps(data.accounts, data.activity, data.leads).filter(r => !r.toLowerCase().includes('total')),
+  // When invoices are present, derive accounts from actual transactions.
+  // Otherwise fall back to the decline-list data.
+  const effectiveAccounts = useMemo(
+    () => data.invoices.length > 0
+      ? deriveAccountsFromInvoices(data.invoices, data.accounts)
+      : data.accounts,
     [data],
   );
 
-  const pulse       = useMemo(() => getPulse(data.accounts, data.leads, data.activity, ref), [data]);
-  const repSummaries = useMemo(() => getRepSummaries(data.accounts, data.activity, ref), [data]);
+  const reps = useMemo(
+    () => allReps(effectiveAccounts, data.activity, data.leads, data.invoices)
+      .filter(r => !r.toLowerCase().includes('total')),
+    [effectiveAccounts, data],
+  );
+
+  const pulse = useMemo(
+    () => getPulse(effectiveAccounts, data.leads, data.activity, ref, data.invoices),
+    [effectiveAccounts, data, ref],
+  );
+
+  const repSummaries = useMemo(
+    () => getRepSummaries(effectiveAccounts, data.activity, ref),
+    [effectiveAccounts, data.activity, ref],
+  );
 
   const filteredAccounts = useMemo(
-    () => (selectedRep ? data.accounts.filter(a => a.rep === selectedRep) : data.accounts),
-    [data, selectedRep],
+    () => (selectedRep ? effectiveAccounts.filter(a => a.rep === selectedRep) : effectiveAccounts),
+    [effectiveAccounts, selectedRep],
   );
 
   const categoryTotals = useMemo(() => getCategoryTotals(filteredAccounts), [filteredAccounts]);
-  const dormant        = useMemo(() => getDormantAccounts(filteredAccounts, ref), [filteredAccounts]);
+  const dormant        = useMemo(() => getDormantAccounts(filteredAccounts, ref), [filteredAccounts, ref]);
   const topAccounts    = useMemo(() => getTopAccounts(filteredAccounts), [filteredAccounts]);
   const worstDecline   = useMemo(() => getWorstDecline(filteredAccounts), [filteredAccounts]);
-  const signals        = useMemo(() => generateSignals(data.accounts, data.activity, data.leads, ref), [data]);
+  const signals        = useMemo(
+    () => generateSignals(effectiveAccounts, data.activity, data.leads, ref),
+    [effectiveAccounts, data.activity, data.leads, ref],
+  );
 
   const today = ref.toLocaleDateString('en-US', {
     weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
@@ -112,7 +134,8 @@ export default function CommandCenter({ data, onReset }: Props) {
 
           {/* File info + upload */}
           <div className="hidden lg:flex items-center gap-2 text-xs text-slate-600 border-l border-slate-800 pl-4">
-            <span>{data.accounts.length} accounts</span>
+            <span>{effectiveAccounts.length} accounts</span>
+            {data.invoices.length > 0 && <span>· {data.invoices.length} invoices</span>}
             {data.leads.length > 0 && <span>· {data.leads.length} leads</span>}
           </div>
 
@@ -148,6 +171,10 @@ export default function CommandCenter({ data, onReset }: Props) {
       <main className="max-w-[1400px] mx-auto px-5 py-5 space-y-5">
 
         <PulseBar pulse={pulse} />
+
+        {data.invoices.length > 0 && (
+          <SalesTrend invoices={data.invoices} selectedRep={selectedRep} refDate={ref} />
+        )}
 
         <RepTable
           reps={repSummaries}
