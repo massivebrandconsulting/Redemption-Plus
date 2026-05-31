@@ -1,136 +1,194 @@
-import { Opportunity, Period, PeriodMetrics } from '../types/opportunity';
+import { AccountRecord, ActivityRecord, LeadRecord } from '../types';
+import { daysSince } from './format';
 
-export const isClosedWon = (stage: string) =>
-  /closed[\s-]?won/i.test(stage) || stage.toLowerCase() === 'won';
+export const DORMANT_DAYS = 30;
 
-export const isClosedLost = (stage: string) =>
-  /closed[\s-]?lost/i.test(stage) || stage.toLowerCase() === 'lost';
+export interface RepSummary {
+  rep: string;
+  totalAccounts: number;
+  activeAccounts: number;
+  dormantAccounts: number;
+  salesYTD: number;
+  salesLYYTD: number;
+  yoyDiff: number;
+  yoyPct: number;
+  totalConnections: number;
+  dominantCat: string;
+}
 
-export const isOpen = (stage: string) =>
-  !isClosedWon(stage) && !isClosedLost(stage);
+export interface CategoryTotals {
+  backwall: { ytd: number; ly: number };
+  bin: { ytd: number; ly: number };
+  crane: { ytd: number; ly: number };
+  plush: { ytd: number; ly: number };
+  total: { ytd: number; ly: number };
+}
 
-const sod = (d: Date): Date => { const r = new Date(d); r.setHours(0, 0, 0, 0); return r; };
-const eod = (d: Date): Date => { const r = new Date(d); r.setHours(23, 59, 59, 999); return r; };
+export interface PulseSummary {
+  totalYTD: number;
+  totalLYYTD: number;
+  yoyDiff: number;
+  yoyPct: number;
+  activeAccounts: number;
+  dormantAccounts: number;
+  totalAccounts: number;
+  dormantPct: number;
+  totalLeads: number;
+  hotLeads: number;
+  totalConnections: number;
+  avgOrderValue: number;
+}
 
-export const getPeriodRange = (period: Period, ref: Date): { start: Date; end: Date } => {
-  const now = eod(ref);
-  let start: Date;
+const isActive = (a: AccountRecord, ref = new Date()) =>
+  a.lastPurchase !== null && daysSince(a.lastPurchase, ref) <= DORMANT_DAYS;
 
-  switch (period) {
-    case 'WTD': {
-      const d = new Date(ref);
-      const dow = d.getDay();
-      d.setDate(d.getDate() - (dow === 0 ? 6 : dow - 1));
-      start = sod(d);
-      break;
-    }
-    case 'MTD':
-      start = sod(new Date(ref.getFullYear(), ref.getMonth(), 1));
-      break;
-    case 'QTD': {
-      const q = Math.floor(ref.getMonth() / 3);
-      start = sod(new Date(ref.getFullYear(), q * 3, 1));
-      break;
-    }
-    case 'YTD':
-      start = sod(new Date(ref.getFullYear(), 0, 1));
-      break;
-  }
+export const getRepSummaries = (
+  accounts: AccountRecord[],
+  activity: ActivityRecord[],
+  ref = new Date(),
+): RepSummary[] => {
+  const repsMap = new Map<string, AccountRecord[]>();
+  accounts.forEach(a => {
+    if (!repsMap.has(a.rep)) repsMap.set(a.rep, []);
+    repsMap.get(a.rep)!.push(a);
+  });
 
-  return { start, end: now };
+  const activityByRep = new Map<string, number>();
+  activity.forEach(r => {
+    activityByRep.set(r.rep, (activityByRep.get(r.rep) || 0) + r.count);
+  });
+
+  return Array.from(repsMap.entries())
+    .map(([rep, accts]) => {
+      const salesYTD = accts.reduce((s, a) => s + a.salesYTD, 0);
+      const salesLYYTD = accts.reduce((s, a) => s + a.salesLYYTD, 0);
+      const active = accts.filter(a => isActive(a, ref));
+      const yoyDiff = salesYTD - salesLYYTD;
+
+      // Dominant category by YTD
+      const cats = { backwall: 0, bin: 0, crane: 0, plush: 0 };
+      accts.forEach(a => {
+        cats.backwall += a.cat.backwall.ytd;
+        cats.bin += a.cat.bin.ytd;
+        cats.crane += a.cat.crane.ytd;
+        cats.plush += a.cat.plush.ytd;
+      });
+      const dominantCat = (Object.entries(cats).sort((a, b) => b[1] - a[1])[0][0]);
+
+      return {
+        rep,
+        totalAccounts: accts.length,
+        activeAccounts: active.length,
+        dormantAccounts: accts.length - active.length,
+        salesYTD,
+        salesLYYTD,
+        yoyDiff,
+        yoyPct: salesLYYTD > 0 ? yoyDiff / salesLYYTD : 0,
+        totalConnections: activityByRep.get(rep) || 0,
+        dominantCat,
+      };
+    })
+    .sort((a, b) => b.salesYTD - a.salesYTD);
 };
 
-export const getPreviousWeekRange = (ref: Date): { start: Date; end: Date } => {
-  const d = new Date(ref);
-  const dow = d.getDay();
-  const thisMonday = new Date(d);
-  thisMonday.setDate(d.getDate() - (dow === 0 ? 6 : dow - 1));
-
-  const lastMonday = new Date(thisMonday);
-  lastMonday.setDate(thisMonday.getDate() - 7);
-
-  const lastSunday = new Date(thisMonday);
-  lastSunday.setDate(thisMonday.getDate() - 1);
-
-  return { start: sod(lastMonday), end: eod(lastSunday) };
+export const getCategoryTotals = (accounts: AccountRecord[]): CategoryTotals => {
+  const t: CategoryTotals = {
+    backwall: { ytd: 0, ly: 0 },
+    bin: { ytd: 0, ly: 0 },
+    crane: { ytd: 0, ly: 0 },
+    plush: { ytd: 0, ly: 0 },
+    total: { ytd: 0, ly: 0 },
+  };
+  accounts.forEach(a => {
+    t.backwall.ytd += a.cat.backwall.ytd;
+    t.backwall.ly += a.cat.backwall.ly;
+    t.bin.ytd += a.cat.bin.ytd;
+    t.bin.ly += a.cat.bin.ly;
+    t.crane.ytd += a.cat.crane.ytd;
+    t.crane.ly += a.cat.crane.ly;
+    t.plush.ytd += a.cat.plush.ytd;
+    t.plush.ly += a.cat.plush.ly;
+  });
+  t.total.ytd = t.backwall.ytd + t.bin.ytd + t.crane.ytd + t.plush.ytd;
+  t.total.ly = t.backwall.ly + t.bin.ly + t.crane.ly + t.plush.ly;
+  return t;
 };
 
-const inRange = (d: Date, start: Date, end: Date) => d >= start && d <= end;
-
-export const calcPeriodMetrics = (
-  opps: Opportunity[],
-  period: Period,
-  ref: Date,
-): PeriodMetrics => {
-  const { start, end } = getPeriodRange(period, ref);
-
-  const closedWon = opps.filter(o => isClosedWon(o.stage) && inRange(o.closeDate, start, end));
-  const newPipeline = opps.filter(o => inRange(o.createdDate, start, end));
-  const openInPeriod = opps.filter(o => isOpen(o.stage) && inRange(o.closeDate, start, end));
+export const getPulse = (
+  accounts: AccountRecord[],
+  leads: LeadRecord[],
+  activity: ActivityRecord[],
+  ref = new Date(),
+): PulseSummary => {
+  const totalYTD = accounts.reduce((s, a) => s + a.salesYTD, 0);
+  const totalLYYTD = accounts.reduce((s, a) => s + a.salesLYYTD, 0);
+  const active = accounts.filter(a => isActive(a, ref));
+  const dormant = accounts.filter(a => !isActive(a, ref));
+  const hotLeads = leads.filter(l => l.engagementScore >= 1000);
+  const totalConnections = activity.reduce((s, r) => s + r.count, 0);
 
   return {
-    closedWonValue: closedWon.reduce((s, o) => s + o.amount, 0),
-    closedWonCount: closedWon.length,
-    newPipelineValue: newPipeline.reduce((s, o) => s + o.amount, 0),
-    newPipelineCount: newPipeline.length,
-    openPipelineValue: openInPeriod.reduce((s, o) => s + o.amount, 0),
-    openPipelineCount: openInPeriod.length,
+    totalYTD,
+    totalLYYTD,
+    yoyDiff: totalYTD - totalLYYTD,
+    yoyPct: totalLYYTD > 0 ? (totalYTD - totalLYYTD) / totalLYYTD : 0,
+    activeAccounts: active.length,
+    dormantAccounts: dormant.length,
+    totalAccounts: accounts.length,
+    dormantPct: accounts.length > 0 ? dormant.length / accounts.length : 0,
+    totalLeads: leads.length,
+    hotLeads: hotLeads.length,
+    totalConnections,
+    avgOrderValue: active.length > 0 ? totalYTD / active.length : 0,
   };
 };
 
-const STAGE_ORDER = [
-  'prospecting', 'qualification', 'needs analysis', 'value proposition',
-  'id. decision makers', 'perception analysis', 'proposal', 'negotiation',
-  'commit', 'contract',
-];
+export const getDormantAccounts = (accounts: AccountRecord[], ref = new Date()) =>
+  accounts
+    .filter(a => !isActive(a, ref))
+    .sort((a, b) => b.salesLYYTD - a.salesLYYTD);
 
-export const getStageDistribution = (opps: Opportunity[]) => {
-  const map = new Map<string, { count: number; value: number }>();
-  opps.filter(o => isOpen(o.stage)).forEach(o => {
-    const cur = map.get(o.stage) ?? { count: 0, value: 0 };
-    map.set(o.stage, { count: cur.count + 1, value: cur.value + o.amount });
-  });
+export const getTopAccounts = (accounts: AccountRecord[]) =>
+  [...accounts].sort((a, b) => b.salesYTD - a.salesYTD).slice(0, 30);
 
+export const getWorstDecline = (accounts: AccountRecord[]) =>
+  [...accounts].sort((a, b) => a.yoyDiff - b.yoyDiff).slice(0, 30);
+
+export const getActivityByType = (activity: ActivityRecord[]) => {
+  const map = new Map<string, number>();
+  activity.forEach(r => map.set(r.type, (map.get(r.type) || 0) + r.count));
   return Array.from(map.entries())
-    .sort(([a], [b]) => {
-      const ai = STAGE_ORDER.findIndex(s => a.toLowerCase().includes(s));
-      const bi = STAGE_ORDER.findIndex(s => b.toLowerCase().includes(s));
-      if (ai === -1 && bi === -1) return a.localeCompare(b);
-      if (ai === -1) return 1;
-      if (bi === -1) return -1;
-      return ai - bi;
-    })
-    .map(([stage, data]) => ({ stage, ...data }));
+    .sort((a, b) => b[1] - a[1])
+    .map(([type, count]) => ({ type, count }));
 };
 
-export const getBigWins = (opps: Opportunity[], ref: Date): Opportunity[] => {
-  const { start, end } = getPreviousWeekRange(ref);
-  return opps
-    .filter(o => isClosedWon(o.stage) && inRange(o.closeDate, start, end))
-    .sort((a, b) => b.amount - a.amount);
+export const getLeadsBySource = (leads: LeadRecord[]) => {
+  const map = new Map<string, number>();
+  leads.forEach(l => {
+    const src = l.leadSource || 'Unknown';
+    map.set(src, (map.get(src) || 0) + 1);
+  });
+  return Array.from(map.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([source, count]) => ({ source, count }));
 };
 
-export const getTopOpportunities = (opps: Opportunity[], limit = 10): Opportunity[] =>
-  opps
-    .filter(o => isOpen(o.stage) && o.amount > 0)
-    .sort((a, b) => b.amount - a.amount)
-    .slice(0, limit);
-
-export const fmt = (n: number): string => {
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `$${Math.round(n / 1_000)}K`;
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency', currency: 'USD', maximumFractionDigits: 0,
-  }).format(n);
+export const filterByRep = <T extends { rep?: string; owner?: string }>(
+  items: T[],
+  rep: string,
+): T[] => {
+  if (!rep) return items;
+  return items.filter(i => (i.rep || i.owner || '') === rep);
 };
 
-export const fmtFull = (n: number): string =>
-  new Intl.NumberFormat('en-US', {
-    style: 'currency', currency: 'USD', maximumFractionDigits: 0,
-  }).format(n);
-
-export const fmtDate = (d: Date): string =>
-  d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-
-export const fmtShortDate = (d: Date): string =>
-  d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+export const allReps = (
+  accounts: AccountRecord[],
+  activity: ActivityRecord[],
+  leads: LeadRecord[],
+): string[] => {
+  const s = new Set<string>();
+  accounts.forEach(a => { if (a.rep) s.add(a.rep); });
+  activity.forEach(r => { if (r.rep) s.add(r.rep); });
+  leads.forEach(l => { if (l.owner) s.add(l.owner); });
+  return Array.from(s).sort();
+};
